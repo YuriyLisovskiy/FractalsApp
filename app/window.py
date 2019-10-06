@@ -1,9 +1,12 @@
+from datetime import datetime
+
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-	QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QComboBox, QLineEdit
+	QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QComboBox, QLineEdit, QProgressBar
 )
 from PyQt5.QtCore import Qt, QThreadPool
 
+from app import BASE_PATH
 from app.settings import APP_MIN_WIDTH, APP_MIN_HEIGHT, APP_NAME, APP_FONT
 from app.canvas import Canvas
 from app.widgets import QPushButton
@@ -17,6 +20,7 @@ class MainWindow(QMainWindow):
 
 	IMAGE_SIZES = ['200x150', '400x300', '640x480', '800x600', '1024x768', '1200x900', '1600x900']
 	MAX_ITERATIONS_VALUES = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000]
+	FRACTALS_NAMES = ['Mandelbrot Set', 'Julia Set']
 
 	def __init__(self):
 		super().__init__(None, Qt.WindowFlags())
@@ -34,42 +38,64 @@ class MainWindow(QMainWindow):
 		self._btn_save = QPushButton(self.tr('Save'), 90, 30, self._save_canvas)
 		self._btn_save.setEnabled(False)
 
+		self._progress = QProgressBar(self)
+		self._progress.setGeometry(200, 80, 250, 20)
+
+		self._fractals = [
+			(MandelbrotSet, '{}/MandelbrotSetFractal.png'.format(BASE_PATH)),
+			(JuliaSet, '{}/JuliaSetFractal.png'.format(BASE_PATH))
+		]
+
+		self._start_calculation_time = None
+
+		self._current_fractal = 0
 		self._image_size = (800, 600)
 		self._max_iterations = 1000
 		self._x_offset = 0
 		self._y_offset = 0
 		self._zoom = 1
 
+		self._fractal_cb = None
 		self._image_size_cb = None
 		self._max_iterations_cb = None
 		self._x_offset_le = None
 		self._y_offset_le = None
 		self._zoom_le = None
 
+		self._current_image = None
+
 		main_widget = self.init_main_widget()
 		self.setCentralWidget(main_widget)
 
-		# self.setup_navigation_menu()
 		self.setFont(QFont('SansSerif', APP_FONT))
 
 	def _save_canvas(self):
-		# TODO:
-		print('Canvas is saved')
+		if self._current_image is not None:
+			self._current_image[1].save(self._current_image[0], 'PNG')
+			self._popup_success('Image \'{}\' is saved.'.format(self._current_image[0]))
+
+	def _handle_progress(self, progress):
+		self._progress.setValue(progress * 100)
 
 	def _draw_set(self):
 		self._btn_save.setEnabled(False)
-		worker = Worker(self._draw_set_fn)
+		worker = Worker(self._draw_set_fn, self._fractals[self._current_fractal])
 		worker.signals.error.connect(self._popup_err)
 		worker.signals.param_success.connect(self._draw_set_finished)
 		self.thread_pool.start(worker)
 
-	def _draw_set_finished(self, image):
-		self._canvas.draw(image)
+	def _draw_set_finished(self, result):
+		later = datetime.now()
+		self._current_image = result
+		self._canvas.draw(result[1])
 		self._btn_save.setEnabled(True)
+		self._popup_success('Time: {} sec'.format((later - self._start_calculation_time).total_seconds()))
 
-	def _draw_set_fn(self):
-		ms = MandelbrotSet(self._image_size[0], self._image_size[1], self._max_iterations)
-		return ms.generate(self._zoom, self._x_offset, self._y_offset)
+	def _draw_set_fn(self, fractal):
+		self._start_calculation_time = datetime.now()
+		cls = fractal[0]
+		ms = cls(self._image_size[0], self._image_size[1], self._max_iterations, self._handle_progress)
+		return fractal[1], ms.generate(self._zoom, self._x_offset, self._y_offset)
 
 	def _add_input(self, parent, title, values, changed):
 		widget = QWidget(self, flags=self.windowFlags())
@@ -111,6 +137,9 @@ class MainWindow(QMainWindow):
 
 		tools = QHBoxLayout(container)
 
+		self._fractal_cb = self._add_input(tools, 'Fractal:', self.FRACTALS_NAMES, self._fractal_changed)
+		self._fractal_cb.setCurrentIndex(self._current_fractal)
+
 		self._image_size_cb = self._add_input(tools, 'Image size:', self.IMAGE_SIZES, self._image_size_changed)
 		self._image_size_cb.setCurrentIndex(self.IMAGE_SIZES.index('x'.join([str(x) for x in self._image_size])))
 
@@ -129,6 +158,9 @@ class MainWindow(QMainWindow):
 		# noinspection PyArgumentList
 		layout.addWidget(container)
 
+		# noinspection PyArgumentList
+		layout.addWidget(self._progress)
+
 		widget = QWidget(flags=self.windowFlags())
 		widget.setLayout(layout)
 		return widget
@@ -138,8 +170,7 @@ class MainWindow(QMainWindow):
 		self._image_size = tuple([int(x) for x in size])
 
 	def _max_iterations_changed(self, i):
-		iterations = self._max_iterations_cb.itemText(i)
-		self._max_iterations = int(iterations)
+		self._max_iterations = int(self._max_iterations_cb.itemText(i))
 
 	def _x_offset_changed(self, text):
 		if len(text) > 0 and text != '-':
@@ -153,10 +184,20 @@ class MainWindow(QMainWindow):
 		if len(text) > 0 and text != '-':
 			self._zoom = float(text)
 
+	def _fractal_changed(self, i):
+		self._current_fractal = i
+
 	def _popup_err(self, err):
 		err_msg = 'Input data error\nCheck inputs'
 		if err is not None:
-			err_msg = err[1]
+			if isinstance(err, str):
+				err_msg = err
+			else:
+				err_msg = err[1]
 		msg_box = QMessageBox()
 		msg_box.warning(self, 'Input data error', err_msg, QMessageBox.Ok)
 		self._btn_draw.setEnabled(True)
+
+	def _popup_success(self, msg):
+		msg_box = QMessageBox()
+		msg_box.information(self, 'Success', msg, QMessageBox.Ok)
